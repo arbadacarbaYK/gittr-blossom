@@ -10,8 +10,7 @@ export const LandingPage: FC<{ db: IDbHandle; config: Config }> = async (
   { db, config },
 ) => {
   const stats = await db.getStats();
-  const description =
-    "gittr Blossom is the blob server for Nostr git on gittr. It stores Pages files and media at blossom.gittr.space. Based on hzrd149/blossom-server v6.1.5.";
+  const description = "Blob storage for gittr Pages and Nostr git.";
   return (
     <Layout title={config.landing.title} description={description}>
       <header class="space-y-1">
@@ -35,7 +34,7 @@ export const LandingPage: FC<{ db: IDbHandle; config: Config }> = async (
           </a>
           . Code:{" "}
           <a
-            href="https://github.com/arbadacarbaYK/gittr-blossom"
+            href="https://gittr.space/npub1n2ph08n4pqz4d3jk6n2p35p2f4ldhc5g5tu7dhftfpueajf4rpxqfjhzmc/gittr-blossom?branch=master"
             class="underline hover:text-gray-200"
           >
             gittr-blossom

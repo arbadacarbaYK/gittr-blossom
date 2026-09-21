@@ -1,10 +1,8 @@
 # gittr Blossom
 
-**This is the Blossom blob server [gittr](https://gittr.space) runs for Nostr git** at [https://blossom.gittr.space](https://blossom.gittr.space).
+Blob storage for [gittr](https://gittr.space) Pages and Nostr git. Live at [blossom.gittr.space](https://blossom.gittr.space). Browse it on gittr: [gittr-blossom](https://gittr.space/npub1n2ph08n4pqz4d3jk6n2p35p2f4ldhc5g5tu7dhftfpueajf4rpxqfjhzmc/gittr-blossom?branch=master).
 
-It stores Pages files and media. It is [hzrd149/blossom-server](https://github.com/hzrd149/blossom-server) **v6.1.5** (the revision in production), with gittr’s public settings: signed uploads, 256 MB max, landing title “gittr Blossom”, listening on localhost port 3050 behind nginx. No passwords or keys are in this repository. The live policy is [`config.gittr.example.yml`](./config.gittr.example.yml).
-
-Protocol: [Blossom](https://github.com/hzrd149/blossom) (BUD specs). Thank you to hzrd149. Pages that read these blobs are [nsite-gateway](https://github.com/arbadacarbaYK/nsite-gateway) at [pages.gittr.space](https://pages.gittr.space). The rest of the stack: [gittr](https://github.com/arbadacarbaYK/gittr), [gitnostr](https://github.com/arbadacarbaYK/gitnostr), [pyramid](https://github.com/arbadacarbaYK/pyramid), [gittr-mcp](https://github.com/arbadacarbaYK/gittr-mcp), [gittr-helper-tools](https://github.com/arbadacarbaYK/gittr-helper-tools).
+Files are stored by their SHA-256 hash ([Blossom](https://github.com/hzrd149/blossom)). This tree follows [hzrd149/blossom-server](https://github.com/hzrd149/blossom-server). Thank you to hzrd149. The host policy gittr uses is [`config.gittr.example.yml`](./config.gittr.example.yml).
 
 ---
 
