@@ -1,0 +1,67 @@
+# Public production policy for blossom.gittr.space.
+# Copy to config.yml. This file has no passwords, keys, or database secrets.
+port: 3000
+host: 0.0.0.0
+publicDomain: "blossom.gittr.space"
+
+database:
+  path: data/sqlite.db
+
+storage:
+  backend: local
+  local:
+    dir: ./data/blobs
+  removeWhenNoOwners: false
+  rules:
+    - type: "text/*"
+      expiration: 12 months
+    - type: "application/javascript"
+      expiration: 12 months
+    - type: "application/json"
+      expiration: 12 months
+    - type: "application/wasm"
+      expiration: 12 months
+    - type: "image/*"
+      expiration: 12 months
+    - type: "font/*"
+      expiration: 12 months
+    - type: "application/font-*"
+      expiration: 12 months
+    - type: "*"
+      expiration: 12 months
+
+upload:
+  enabled: true
+  requireAuth: true
+  maxSize: 268435456
+  workers: 0
+  maxJobsPerWorker: 4
+  throughputWindowMs: 1000
+  requirePubkeyInRule: false
+
+mirror:
+  enabled: false
+  requireAuth: true
+
+delete:
+  requireAuth: true
+
+list:
+  enabled: false
+  requireAuth: false
+  allowListOthers: true
+
+media:
+  enabled: false
+  requireAuth: true
+
+prune:
+  initialDelayMs: 60000
+  intervalMs: 30000
+
+landing:
+  enabled: true
+  title: "gittr Blossom"
+
+report:
+  enabled: false

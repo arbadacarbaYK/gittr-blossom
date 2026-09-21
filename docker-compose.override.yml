@@ -1,0 +1,6 @@
+services:
+  blossom:
+    ports:
+      - "127.0.0.1:3050:3000"
+    healthcheck:
+      disable: true
