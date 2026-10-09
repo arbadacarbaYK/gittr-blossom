@@ -1,4 +1,5 @@
 import type { Client } from "@libsql/client";
+import { blobListFilterSql } from "../utils/blob-kind.ts";
 
 export interface BlobStats {
   blobCount: number;
@@ -292,6 +293,7 @@ const BLOB_SORT_COLUMNS = new Set(["sha256", "type", "size", "uploaded"]);
  *
  * @param opts.filter.q     Full-text search across sha256 and type columns.
  * @param opts.filter.type  Exact MIME type or array of MIME types (IN clause).
+ * @param opts.filter.kind  Admin list group: images, pages, apps, video, unlabeled.
  * @param opts.sort         [column, "ASC"|"DESC"]. Column must be in BLOB_SORT_COLUMNS.
  * @param opts.limit        LIMIT clause value.
  * @param opts.offset       OFFSET clause value.
@@ -299,7 +301,7 @@ const BLOB_SORT_COLUMNS = new Set(["sha256", "type", "size", "uploaded"]);
 export async function listAllBlobs(
   db: Client,
   opts: {
-    filter?: { q?: string; type?: string | string[] };
+    filter?: { q?: string; type?: string | string[]; kind?: string };
     sort?: [string, string];
     limit?: number;
     offset?: number;
@@ -312,6 +314,8 @@ export async function listAllBlobs(
     conditions.push("(b.sha256 LIKE ? OR b.type LIKE ?)");
     args.push(`%${opts.filter.q}%`, `%${opts.filter.q}%`);
   }
+  const kindSql = blobListFilterSql(opts.filter?.kind, "b.type");
+  if (kindSql) conditions.push(kindSql);
   if (opts.filter?.type !== undefined) {
     const types = Array.isArray(opts.filter.type)
       ? opts.filter.type
@@ -369,7 +373,7 @@ export async function listAllBlobs(
  */
 export async function countBlobs(
   db: Client,
-  filter?: { q?: string; type?: string | string[] },
+  filter?: { q?: string; type?: string | string[]; kind?: string },
 ): Promise<number> {
   const conditions: string[] = [];
   const args: (string | number)[] = [];
@@ -378,6 +382,8 @@ export async function countBlobs(
     conditions.push("(sha256 LIKE ? OR type LIKE ?)");
     args.push(`%${filter.q}%`, `%${filter.q}%`);
   }
+  const kindSql = blobListFilterSql(filter?.kind, "type");
+  if (kindSql) conditions.push(kindSql);
   if (filter?.type !== undefined) {
     const types = Array.isArray(filter.type) ? filter.type : [filter.type];
     if (types.length === 1) {
