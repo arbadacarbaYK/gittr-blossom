@@ -1,4 +1,4 @@
-import { type Client, createClient } from "@libsql/client";
+import type { Client } from "@libsql/client";
 import { dirname, join } from "@std/path";
 
 let _client: Client | null = null;
@@ -22,8 +22,10 @@ export async function initDb(config: DbConfig): Promise<Client> {
   let client: Client;
 
   if (remote) {
+    const { createClient } = await import("@libsql/client");
     client = createClient({ url: config.url!, authToken: config.authToken });
   } else {
+    const { createClient } = await import("@libsql/client/sqlite3");
     // Ensure the parent directory exists for local SQLite
     const dir = dirname(config.path);
     await Deno.mkdir(dir, { recursive: true });
@@ -50,7 +52,15 @@ export async function initDb(config: DbConfig): Promise<Client> {
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
     for (const stmt of statements) {
-      await client.execute(stmt);
+      try {
+        await client.execute(stmt);
+      } catch (err) {
+        // `ALTER TABLE ... ADD COLUMN` has no IF NOT EXISTS form in SQLite.
+        // Tolerate re-running an additive column migration on an existing DB.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/duplicate column name/i.test(msg)) continue;
+        throw err;
+      }
     }
   }
 

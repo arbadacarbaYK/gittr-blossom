@@ -11,14 +11,12 @@
 
 import type { Hono } from "@hono/hono";
 import { assertEquals } from "@std/assert";
+import { crypto as stdCrypto } from "@std/crypto";
 import { encodeBase64Url } from "@std/encoding/base64url";
+import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import type { NostrEvent } from "nostr-tools";
-import {
-  finalizeEvent,
-  generateSecretKey,
-  getPublicKey,
-} from "nostr-tools/pure";
+import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { ConfigSchema } from "../../src/config/schema.ts";
 import { initDb } from "../../src/db/client.ts";
 import type { BlossomVariables } from "../../src/middleware/auth.ts";
@@ -32,6 +30,14 @@ import { initPool } from "../../src/workers/pool.ts";
 
 const sk = generateSecretKey();
 const pk = getPublicKey(sk);
+
+async function sha256Hex(data: Uint8Array): Promise<string> {
+  const buf = await stdCrypto.subtle.digest(
+    "SHA-256",
+    data.buffer as ArrayBuffer,
+  );
+  return encodeHex(new Uint8Array(buf));
+}
 
 function makeUploadAuth(
   opts: {
@@ -58,9 +64,14 @@ function makeUploadAuth(
 }
 
 function encodeAuth(event: NostrEvent): string {
-  return `Nostr ${
-    encodeBase64Url(new TextEncoder().encode(JSON.stringify(event)))
-  }`;
+  return `Nostr ${encodeBase64Url(new TextEncoder().encode(JSON.stringify(event)))}`;
+}
+
+function findNip94Tag(
+  descriptor: { nip94?: string[][] },
+  name: string,
+): string[] | undefined {
+  return descriptor.nip94?.find((tag) => tag[0] === name);
 }
 
 // ---------------------------------------------------------------------------
@@ -100,7 +111,8 @@ Deno.test({
 
     // Upload a test blob so the pubkey owns at least one blob
     const body = new TextEncoder().encode("list e2e test blob");
-    const auth = makeUploadAuth({});
+    const hash = await sha256Hex(body);
+    const auth = makeUploadAuth({ hash });
 
     const uploadRes = await app.fetch(
       new Request("http://localhost/upload", {
@@ -144,6 +156,10 @@ Deno.test({
     assertEquals(typeof first.url, "string");
     assertEquals(typeof first.size, "number");
     assertEquals(typeof first.type, "string");
+    assertEquals(findNip94Tag(first, "url"), ["url", first.url]);
+    assertEquals(findNip94Tag(first, "m"), ["m", first.type]);
+    assertEquals(findNip94Tag(first, "x"), ["x", first.sha256]);
+    assertEquals(findNip94Tag(first, "size"), ["size", String(first.size)]);
   },
   ...testOpts,
 });

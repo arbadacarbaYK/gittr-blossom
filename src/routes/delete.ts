@@ -15,13 +15,7 @@ import { Hono } from "@hono/hono";
 import type { Client } from "@libsql/client";
 import { extension as extFromMime } from "@std/media-types";
 import type { IBlobStorage } from "../storage/interface.ts";
-import {
-  countOwners,
-  deleteBlob,
-  getBlob,
-  isOwner,
-  removeOwner,
-} from "../db/blobs.ts";
+import { countOwners, deleteBlob, getBlob, getMediaThumbnailsForParent, isOwner, removeOwner } from "../db/blobs.ts";
 import { requireAuth, requireXTag } from "../middleware/auth.ts";
 import type { BlossomVariables } from "../middleware/auth.ts";
 import { errorResponse } from "../middleware/errors.ts";
@@ -79,7 +73,6 @@ export function buildDeleteRouter(
       // Remove only this pubkey's ownership record
       await removeOwner(db, hash, pubkey);
 
-      // Check whether any other owners remain
       const remaining = await countOwners(db, hash);
 
       if (remaining > 0) {
@@ -89,12 +82,27 @@ export function buildDeleteRouter(
     }
 
     // No owners left (or unauthenticated delete) — purge the blob entirely
+    const thumbnails = await getMediaThumbnailsForParent(db, hash);
     await deleteBlob(db, hash);
 
     // Remove from storage backend (best-effort — DB record is the source of truth)
-    await storage.remove(hash, ext).catch((err) =>
-      console.warn(`Failed to remove blob ${hash} from storage:`, err)
-    );
+    await storage.remove(hash, ext).catch((err) => console.warn(`Failed to remove blob ${hash} from storage:`, err));
+    for (const thumbnail of thumbnails) {
+      await deleteBlob(db, thumbnail.sha256).catch((err) =>
+        console.warn(
+          `Failed to remove thumbnail blob ${thumbnail.sha256} from DB:`,
+          err,
+        )
+      );
+      await storage.remove(thumbnail.sha256, mimeToExt(thumbnail.type)).catch((
+        err,
+      ) =>
+        console.warn(
+          `Failed to remove thumbnail blob ${thumbnail.sha256} from storage:`,
+          err,
+        )
+      );
+    }
 
     return ctx.body(null, 204);
   });

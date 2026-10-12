@@ -54,6 +54,9 @@ list:
 media:
   enabled: false
   requireAuth: true
+  # Stay false. The upstream default is true, which would refuse media unless
+  # the uploader is named in a storage rule. Media itself stays off.
+  requirePubkeyInRule: false
 
 prune:
   initialDelayMs: 60000

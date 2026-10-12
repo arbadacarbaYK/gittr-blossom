@@ -14,14 +14,11 @@ import { encodeBase64Url } from "@std/encoding/base64url";
 import { encodeHex } from "@std/encoding/hex";
 import { crypto as stdCrypto } from "@std/crypto";
 import { join } from "@std/path";
-import {
-  finalizeEvent,
-  generateSecretKey,
-  getPublicKey,
-} from "nostr-tools/pure";
+import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import type { NostrEvent } from "nostr-tools";
 import { initDb } from "../../src/db/client.ts";
 import { LocalStorage } from "../../src/storage/local.ts";
+import type { WriteSession } from "../../src/storage/interface.ts";
 import { initPool } from "../../src/workers/pool.ts";
 import { buildApp } from "../../src/server.ts";
 import { ConfigSchema } from "../../src/config/schema.ts";
@@ -71,9 +68,14 @@ function makeUploadAuth(
 
 /** Encode event as Base64url for the Authorization header. */
 function encodeAuth(event: NostrEvent): string {
-  return `Nostr ${
-    encodeBase64Url(new TextEncoder().encode(JSON.stringify(event)))
-  }`;
+  return `Nostr ${encodeBase64Url(new TextEncoder().encode(JSON.stringify(event)))}`;
+}
+
+function findNip94Tag(
+  descriptor: { nip94?: string[][] },
+  name: string,
+): string[] | undefined {
+  return descriptor.nip94?.find((tag) => tag[0] === name);
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +91,7 @@ function encodeAuth(event: NostrEvent): string {
 let appNoAuth: Hono<{ Variables: BlossomVariables }>;
 let appWithAuth: Hono<{ Variables: BlossomVariables }>;
 let tmpDir: string;
+let storageDir: string;
 let cleanup: () => Promise<void>;
 
 // Deno doesn't have a native beforeAll, so we use a setup test that runs first.
@@ -99,7 +102,7 @@ Deno.test({
   async fn() {
     tmpDir = await Deno.makeTempDir({ prefix: "blossom_e2e_upload_" });
     const dbPath = join(tmpDir, "test.db");
-    const storageDir = join(tmpDir, "blobs");
+    storageDir = join(tmpDir, "blobs");
     const dbConfig = { path: dbPath };
 
     const db = await initDb(dbConfig);
@@ -226,6 +229,58 @@ Deno.test({
 });
 
 Deno.test({
+  name: "PUT /upload: streamed bytes exceeding maxSize return 413 and release the worker",
+  async fn() {
+    const smallDb = await initDb({ path: join(tmpDir, "stream-maxsize.db") });
+    const smallStorage = new LocalStorage(join(tmpDir, "blobs-stream-maxsize"));
+    await smallStorage.setup();
+    const smallConfig = ConfigSchema.parse({
+      publicDomain: "localhost",
+      storage: { rules: [{ type: "*", expiration: "1 month" }] },
+      upload: { requireAuth: false, enabled: true, maxSize: 100 },
+    });
+    const smallApp = await buildApp(smallDb, smallStorage, smallConfig);
+
+    try {
+      const oversized = await smallApp.fetch(
+        new Request("http://localhost/upload", {
+          method: "PUT",
+          headers: {
+            "Content-Length": "100",
+            "Content-Type": "application/octet-stream",
+          },
+          body: new Uint8Array(101),
+        }),
+      );
+      assertEquals(oversized.status, 413);
+      await oversized.body?.cancel();
+
+      const atLimit = await smallApp.fetch(
+        new Request("http://localhost/upload", {
+          method: "PUT",
+          headers: {
+            "Content-Length": "100",
+            "Content-Type": "application/octet-stream",
+          },
+          body: new Uint8Array(100),
+        }),
+      );
+      assertEquals(atLimit.status, 201);
+      await atLimit.body?.cancel();
+
+      const tempFiles = [];
+      for await (const entry of Deno.readDir(smallStorage.tmpDir)) {
+        tempFiles.push(entry.name);
+      }
+      assertEquals(tempFiles, []);
+    } finally {
+      smallDb.close();
+    }
+  },
+  ...testOpts,
+});
+
+Deno.test({
   name: "PUT /upload: disallowed MIME type returns 415",
   async fn() {
     // Build a one-off app that only accepts images via storage rules
@@ -286,6 +341,99 @@ Deno.test({
 });
 
 Deno.test({
+  name: "PUT /upload: multipart is cancelled before malformed auth parsing",
+  async fn() {
+    let cancelCount = 0;
+    let pullCount = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3]));
+      },
+      pull() {
+        pullCount++;
+        throw new Error("rejected multipart body must not be pulled");
+      },
+      cancel() {
+        cancelCount++;
+      },
+    });
+
+    const res = await fetchWithAuth("/upload", {
+      method: "PUT",
+      headers: {
+        "Content-Length": "3",
+        "Content-Type": 'Multipart/Form-Data; boundary="blossom-boundary"',
+        Authorization: "Nostr not-valid-base64url%",
+      },
+      body,
+    });
+
+    assertEquals(res.status, 415);
+    assertEquals(cancelCount, 1);
+    assertEquals(pullCount, 0);
+    assertMatch(res.headers.get("X-Reason") ?? "", /^[\x20-\x7e]+$/);
+    await res.body?.cancel();
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "PUT /upload: urlencoded body with parameters is cancelled without pulling",
+  async fn() {
+    let cancelCount = 0;
+    let pullCount = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3]));
+      },
+      pull() {
+        pullCount++;
+        throw new Error("rejected urlencoded body must not be pulled");
+      },
+      cancel() {
+        cancelCount++;
+      },
+    });
+
+    const res = await fetchNoAuth("/upload", {
+      method: "PUT",
+      headers: {
+        "Content-Length": "3",
+        "Content-Type": "Application/X-Www-Form-Urlencoded; charset=UTF-8",
+      },
+      body,
+    });
+
+    assertEquals(res.status, 415);
+    assertEquals(cancelCount, 1);
+    assertEquals(pullCount, 0);
+    assertMatch(res.headers.get("X-Reason") ?? "", /^[\x20-\x7e]+$/);
+    await res.body?.cancel();
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "PUT /upload: raw body still reaches malformed auth parsing",
+  async fn() {
+    const body = new Uint8Array([1, 2, 3]);
+    const res = await fetchWithAuth("/upload", {
+      method: "PUT",
+      headers: {
+        "Content-Length": String(body.byteLength),
+        "Content-Type": "application/octet-stream",
+        Authorization: "Nostr not-valid-base64url%",
+      },
+      body,
+    });
+
+    assertEquals(res.status, 400);
+    await res.body?.cancel();
+  },
+  ...testOpts,
+});
+
+Deno.test({
   name: "PUT /upload: auth with wrong t tag returns 403",
   async fn() {
     const body = new Uint8Array([1, 2, 3]);
@@ -329,12 +477,17 @@ Deno.test({
     assertEquals(json.sha256, expectedHash);
     assertEquals(json.size, body.byteLength);
     assertEquals(json.type, "text/plain");
+    assertEquals(json.dim, undefined);
     assertBlobUrl(json.url, {
       protocol: "http:",
       host: "localhost",
       hash: expectedHash,
       ext: "txt",
     });
+    assertEquals(findNip94Tag(json, "url"), ["url", json.url]);
+    assertEquals(findNip94Tag(json, "m"), ["m", "text/plain"]);
+    assertEquals(findNip94Tag(json, "x"), ["x", expectedHash]);
+    assertEquals(findNip94Tag(json, "size"), ["size", String(body.byteLength)]);
   },
   ...testOpts,
 });
@@ -367,11 +520,52 @@ Deno.test({
 });
 
 Deno.test({
-  name: "PUT /upload: with correct auth and open x-tag returns 201",
+  name: "PUT /upload: declared hash with missing x scope returns 403 and cancels before pull",
   async fn() {
-    const body = new TextEncoder().encode("authenticated upload");
-    // Open token — no x tags, permits any blob
+    const bytes = new TextEncoder().encode("authenticated upload denied early");
+    const hash = await sha256Hex(bytes);
     const auth = makeUploadAuth({});
+    let cancelCount = 0;
+    let pullCount = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes);
+      },
+      pull() {
+        pullCount++;
+        throw new Error("scope-denied upload body must not be pulled");
+      },
+      cancel() {
+        cancelCount++;
+      },
+    });
+
+    const res = await fetchWithAuth("/upload", {
+      method: "PUT",
+      headers: {
+        "Content-Length": String(bytes.byteLength),
+        "Content-Type": "text/plain",
+        "X-SHA-256": hash,
+        Authorization: encodeAuth(auth),
+      },
+      body,
+    });
+    assertEquals(res.status, 403);
+    assertEquals(cancelCount, 1);
+    assertEquals(pullCount, 0);
+    await res.body?.cancel();
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "PUT /upload: missing deferred x scope aborts staged bytes and metadata",
+  async fn() {
+    const body = new TextEncoder().encode("authenticated upload denied after hashing");
+    const hash = await sha256Hex(body);
+    const auth = makeUploadAuth({});
+    const stagingDir = join(storageDir, ".tmp");
+    const entriesBefore = (await Array.fromAsync(Deno.readDir(stagingDir))).map((entry) => entry.name).sort();
 
     const res = await fetchWithAuth("/upload", {
       method: "PUT",
@@ -382,10 +576,81 @@ Deno.test({
       },
       body,
     });
+    assertEquals(res.status, 403);
+    await res.body?.cancel();
+
+    const entriesAfter = (await Array.fromAsync(Deno.readDir(stagingDir))).map((entry) => entry.name).sort();
+    assertEquals(entriesAfter, entriesBefore);
+
+    const blob = await fetchWithAuth(`/${hash}`);
+    assertEquals(blob.status, 404);
+    await blob.body?.cancel();
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "PUT /upload: deferred x scope cleanup failure returns 500",
+  async fn() {
+    class FailingAbortStorage extends LocalStorage {
+      override async abortWrite(session: WriteSession): Promise<void> {
+        await super.abortWrite(session);
+        throw new Error("simulated staged upload cleanup failure");
+      }
+    }
+
+    const failingDb = await initDb({ path: join(tmpDir, "cleanup-failure.db") });
+    const failingStorage = new FailingAbortStorage(join(tmpDir, "blobs-cleanup-failure"));
+    await failingStorage.setup();
+    const failingConfig = ConfigSchema.parse({
+      publicDomain: "localhost",
+      upload: { requireAuth: true, enabled: true },
+    });
+    const failingApp = await buildApp(failingDb, failingStorage, failingConfig);
+    const body = new TextEncoder().encode("cleanup failure upload");
+
+    try {
+      const res = await failingApp.fetch(
+        new Request("http://localhost/upload", {
+          method: "PUT",
+          headers: {
+            "Content-Length": String(body.byteLength),
+            "Content-Type": "text/plain",
+            Authorization: encodeAuth(makeUploadAuth({})),
+          },
+          body,
+        }),
+      );
+      assertEquals(res.status, 500);
+      await res.body?.cancel();
+    } finally {
+      failingDb.close();
+    }
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "PUT /upload: matching scope with expiration beyond 30 days returns 201",
+  async fn() {
+    const body = new TextEncoder().encode("long future authorization");
+    const hash = await sha256Hex(body);
+    const expiration = Math.floor(Date.now() / 1000) + 31 * 24 * 60 * 60;
+    const auth = makeUploadAuth({ hash, expiration });
+
+    const res = await fetchWithAuth("/upload", {
+      method: "PUT",
+      headers: {
+        "Content-Length": String(body.byteLength),
+        "Content-Type": "text/plain",
+        "X-SHA-256": hash,
+        Authorization: encodeAuth(auth),
+      },
+      body,
+    });
     assertEquals(res.status, 201);
-    const json = await res.json();
-    assertEquals(typeof json.sha256, "string");
-    assertEquals(json.sha256.length, 64);
+    const descriptor = await res.json();
+    assertEquals(descriptor.sha256, hash);
   },
   ...testOpts,
 });
@@ -443,8 +708,7 @@ Deno.test({
 });
 
 Deno.test({
-  name:
-    "PUT /upload: mismatched X-SHA-256 returns 409 with X-Reason containing mismatch info",
+  name: "PUT /upload: mismatched X-SHA-256 returns 409 with X-Reason containing mismatch info",
   async fn() {
     const body = new TextEncoder().encode("conflict test content");
     const wrongHash = "c".repeat(64);
@@ -569,8 +833,7 @@ Deno.test({
 // ---------------------------------------------------------------------------
 
 Deno.test({
-  name:
-    "PUT /upload: same content uploaded twice returns same descriptor (dedup)",
+  name: "PUT /upload: same content uploaded twice returns same descriptor (dedup)",
   async fn() {
     const body = new TextEncoder().encode("deduplicated content abc123");
     const hash = await sha256Hex(body);
@@ -604,6 +867,112 @@ Deno.test({
 });
 
 Deno.test({
+  name: "PUT /upload: dedup hit drains the request body rather than cancelling",
+  async fn() {
+    const body = new TextEncoder().encode("drain-on-dedup payload");
+    const hash = await sha256Hex(body);
+
+    // Seed the blob so the next upload takes the dedup path.
+    const seed = await fetchNoAuth("/upload", {
+      method: "PUT",
+      headers: {
+        "Content-Length": String(body.byteLength),
+        "Content-Type": "application/octet-stream",
+        "X-SHA-256": hash,
+      },
+      body: body.slice(),
+    });
+    assertEquals(seed.status, 201);
+
+    // Re-upload with a streaming body that records whether it was cancelled.
+    // Cancelling a body the client is still sending resets the request stream,
+    // which Firefox reports as NS_ERROR_NET_PARTIAL_TRANSFER even though this
+    // path returns 200 — so the dedup response must consume the stream.
+    let cancelled = false;
+    let offset = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset >= body.byteLength) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(body.slice(offset, offset + 8));
+        offset += 8;
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+
+    const res = await fetchNoAuth("/upload", {
+      method: "PUT",
+      headers: {
+        "Content-Length": String(body.byteLength),
+        "Content-Type": "application/octet-stream",
+        "X-SHA-256": hash,
+      },
+      body: stream,
+    });
+
+    assertEquals(res.status, 200);
+    await res.json();
+    assertEquals(cancelled, false);
+    assertEquals(offset >= body.byteLength, true);
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "PUT /upload: dedup hit returns 413 when streamed bytes exceed maxSize",
+  async fn() {
+    const smallDb = await initDb({ path: join(tmpDir, "dedup-maxsize.db") });
+    const smallStorage = new LocalStorage(join(tmpDir, "blobs-dedup-maxsize"));
+    await smallStorage.setup();
+    const smallConfig = ConfigSchema.parse({
+      publicDomain: "localhost",
+      storage: { rules: [{ type: "*", expiration: "1 month" }] },
+      upload: { requireAuth: false, enabled: true, maxSize: 32 },
+    });
+    const smallApp = await buildApp(smallDb, smallStorage, smallConfig);
+    const seedBody = new TextEncoder().encode("dedup seed");
+    const hash = await sha256Hex(seedBody);
+
+    try {
+      const seed = await smallApp.fetch(
+        new Request("http://localhost/upload", {
+          method: "PUT",
+          headers: {
+            "Content-Length": String(seedBody.byteLength),
+            "Content-Type": "application/octet-stream",
+            "X-SHA-256": hash,
+          },
+          body: seedBody,
+        }),
+      );
+      assertEquals(seed.status, 201);
+      await seed.body?.cancel();
+
+      const oversized = await smallApp.fetch(
+        new Request("http://localhost/upload", {
+          method: "PUT",
+          headers: {
+            "Content-Length": "32",
+            "Content-Type": "application/octet-stream",
+            "X-SHA-256": hash,
+          },
+          body: new Uint8Array(33),
+        }),
+      );
+      assertEquals(oversized.status, 413);
+      await oversized.body?.cancel();
+    } finally {
+      smallDb.close();
+    }
+  },
+  ...testOpts,
+});
+
+Deno.test({
   name: "GET /list/:pubkey returns full valid blob URLs using request scheme",
   async fn() {
     const listDb = await initDb({ path: join(tmpDir, "list-url-test.db") });
@@ -618,7 +987,7 @@ Deno.test({
 
     const body = new TextEncoder().encode("list url coverage");
     const hash = await sha256Hex(body);
-    const auth = makeUploadAuth({});
+    const auth = makeUploadAuth({ hash });
 
     const uploadRes = await listApp.fetch(
       new Request("https://localhost/upload", {
@@ -647,6 +1016,16 @@ Deno.test({
       hash,
       ext: "txt",
     });
+    assertEquals(findNip94Tag(descriptors[0], "url"), [
+      "url",
+      descriptors[0].url,
+    ]);
+    assertEquals(findNip94Tag(descriptors[0], "m"), ["m", "text/plain"]);
+    assertEquals(findNip94Tag(descriptors[0], "x"), ["x", hash]);
+    assertEquals(findNip94Tag(descriptors[0], "size"), [
+      "size",
+      String(body.byteLength),
+    ]);
 
     listDb.close();
   },
@@ -662,6 +1041,20 @@ Deno.test({
   async fn() {
     const res = await fetchNoAuth("/upload", { method: "HEAD" });
     assertEquals(res.status, 411);
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "HEAD /upload: malformed X-Content-Length returns 400",
+  async fn() {
+    for (const length of ["100junk", "1.5", "1e12", "-1", "+1", "9007199254740992"]) {
+      const res = await fetchNoAuth("/upload", {
+        method: "HEAD",
+        headers: { "X-Content-Length": length },
+      });
+      assertEquals(res.status, 400, `length=${JSON.stringify(length)}`);
+    }
   },
   ...testOpts,
 });
@@ -709,6 +1102,117 @@ Deno.test({
 });
 
 Deno.test({
+  name: "HEAD /upload: declared hash with missing x scope returns 403",
+  async fn() {
+    const hash = "a".repeat(64);
+    const auth = makeUploadAuth({});
+    const res = await fetchWithAuth("/upload", {
+      method: "HEAD",
+      headers: {
+        "X-Content-Length": "100",
+        "X-SHA-256": hash,
+        Authorization: encodeAuth(auth),
+      },
+    });
+    assertEquals(res.status, 403);
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "HEAD /upload: declared hash with mismatched x scope returns 403",
+  async fn() {
+    const hash = "a".repeat(64);
+    const auth = makeUploadAuth({ hash: "b".repeat(64) });
+    const res = await fetchWithAuth("/upload", {
+      method: "HEAD",
+      headers: {
+        "X-Content-Length": "100",
+        "X-SHA-256": hash,
+        Authorization: encodeAuth(auth),
+      },
+    });
+    assertEquals(res.status, 403);
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "HEAD /upload: declared hash with matching x scope returns 200",
+  async fn() {
+    const hash = "a".repeat(64);
+    const auth = makeUploadAuth({ hash });
+    const res = await fetchWithAuth("/upload", {
+      method: "HEAD",
+      headers: {
+        "X-Content-Length": "100",
+        "X-SHA-256": hash,
+        Authorization: encodeAuth(auth),
+      },
+    });
+    assertEquals(res.status, 200);
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "HEAD /upload: authenticated headerless preflight remains compatible",
+  async fn() {
+    const auth = makeUploadAuth({});
+    const res = await fetchWithAuth("/upload", {
+      method: "HEAD",
+      headers: {
+        "X-Content-Length": "100",
+        Authorization: encodeAuth(auth),
+      },
+    });
+    assertEquals(res.status, 200);
+  },
+  ...testOpts,
+});
+
+for (
+  const contentType of [
+    'Multipart/Form-Data; boundary="blossom-boundary"',
+    "Application/X-Www-Form-Urlencoded; charset=UTF-8",
+  ]
+) {
+  Deno.test({
+    name: `HEAD /upload: rejects envelope X-Content-Type ${contentType}`,
+    async fn() {
+      const res = await fetchWithAuth("/upload", {
+        method: "HEAD",
+        headers: {
+          "X-Content-Length": "3",
+          "X-Content-Type": contentType,
+          Authorization: "Nostr not-valid-base64url%",
+        },
+      });
+
+      assertEquals(res.status, 415);
+      assertMatch(res.headers.get("X-Reason") ?? "", /^[\x20-\x7e]+$/);
+    },
+    ...testOpts,
+  });
+}
+
+Deno.test({
+  name: "HEAD /upload: ignores Content-Type when X-Content-Type is absent",
+  async fn() {
+    const res = await fetchNoAuth("/upload", {
+      method: "HEAD",
+      headers: {
+        "X-Content-Length": "3",
+        "Content-Type": "multipart/form-data",
+      },
+    });
+
+    assertEquals(res.status, 200);
+  },
+  ...testOpts,
+});
+
+Deno.test({
   name: "HEAD /upload: valid preflight returns 200 OK",
   async fn() {
     const res = await fetchNoAuth("/upload", {
@@ -724,8 +1228,7 @@ Deno.test({
 });
 
 Deno.test({
-  name:
-    "HEAD /upload: existing blob with X-SHA-256 returns 200 with dedup reason",
+  name: "HEAD /upload: existing blob with X-SHA-256 returns 200 with dedup reason",
   async fn() {
     // Upload the blob first
     const body = new TextEncoder().encode("preflight dedup test xyz");

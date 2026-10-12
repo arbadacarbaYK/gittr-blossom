@@ -7,6 +7,7 @@
  * Mounted at /admin in the parent app. Internal paths are relative to that prefix:
  *   GET  /admin                              → redirect to /admin/blobs
  *   GET  /admin/blobs                        → BlobsPage SSR
+ *   GET  /admin/preview/:sha256              → inline media preview
  *   GET  /admin/blobs/:sha256                → BlobDetailPage SSR
  *   GET  /admin/users                        → UsersPage SSR
  *   GET  /admin/users/:pubkey                → UserDetailPage SSR
@@ -80,8 +81,7 @@ export function buildAdminRouter(
     );
   });
 
-  // Inline preview for the admin list. Same login as the rest of /admin.
-  // Does not send a download header, so pictures stay on the page.
+  // Same login as the rest of /admin. Inline, so pictures stay on the page.
   app.get("/preview/:sha256", async (c) => {
     const sha256 = (c.req.param("sha256") ?? "").toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(sha256)) return c.text("Not found", 404);
@@ -106,11 +106,7 @@ export function buildAdminRouter(
   app.get("/blobs/:sha256", (c) => {
     const sha256 = c.req.param("sha256");
     return c.html(
-      <BlobDetailPage
-        db={dbHandle}
-        storage={storage}
-        sha256={sha256}
-      />,
+      <BlobDetailPage db={dbHandle} storage={storage} sha256={sha256} />,
     );
   });
 
@@ -146,7 +142,6 @@ export function buildAdminRouter(
 
   // ── JSON action endpoints ───────────────────────────────────────────────────
 
-  // DELETE /api/blobs/:sha256 — force-delete a blob and its file
   app.delete("/api/blobs/:sha256", async (c) => {
     const sha256 = c.req.param("sha256");
     const blob = await getBlob(db, sha256);
